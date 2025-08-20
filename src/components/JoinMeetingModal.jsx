@@ -10,43 +10,12 @@ export default function JoinMeetingModal({ isOpen, onClose, meetingId, setMeetin
 			return;
 		}
 
-		// Generate a unique identity for the guest
-		const identity = `guest-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`;
-
-		try {
-			const response = await fetch(`/api/token?identity=${identity}&roomName=${meetingId}`);
-			
-			if (!response.ok) {
-				if (response.headers.get('content-type')?.includes('text/html')) {
-					console.error("Received HTML instead of JSON - API route may not exist");
-					toast.error("API route not found. Please check your /api/token endpoint.");
-					return;
-				}
-				throw new Error(`HTTP error! status: ${response.status}`);
-			}
-
-			const data = await response.json();
-			
-			if (!data.token) {
-				toast.error("No token received from server");
-				return;
-			}
-
-			toast.success(`Joining meeting: ${meetingId}`);
-			onClose();
-			setMeetingId('');
-			
-			// Navigate to the room with the token
-			window.location.href = `/room/${meetingId}?token=${data.token}`;
-			
-		} catch (error) {
-			console.error('Failed to join meeting:', error);
-			if (error.message.includes('fetch')) {
-				toast.error("Cannot connect to server. Please check if your server is running.");
-			} else {
-				toast.error("Failed to join meeting. Please check the meeting ID and try again.");
-			}
-		}
+		toast.success(`Joining meeting: ${meetingId}`);
+		onClose();
+		setMeetingId('');
+		
+		// Navigate to the room without token - let the room component handle authentication
+		window.location.href = `/room/${meetingId}`;
 	};
 
 	const handleKeyPress = (e) => {

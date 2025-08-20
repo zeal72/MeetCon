@@ -1,7 +1,7 @@
-'use client';
+
 
 import { useState } from 'react';
-import { useAuth } from '@/app/Contexts/AuthContext';
+import { useAuth } from '@/Contexts/AuthContext';
 import QuickActions from '@/components/QuickActions';
 import JoinMeetingModal from '@/components/JoinMeetingModal';
 import AuthModal from '@/components/AuthModal';
@@ -121,4 +121,52 @@ export default function HomeClient({ searchParams }) {
       />
     </div>
   );
+
 }
+
+// import { useState } from 'react';
+// import { useAuth } from '@/Contexts/AuthContext';
+// import QuickActions from '@/components/QuickActions';
+// import JoinMeetingModal from '@/components/JoinMeetingModal';
+// import AuthModal from '@/components/AuthModal';
+// import UserProfile from '@/components/userProfile';
+// import { Video, LogIn, UserPlus } from 'lucide-react';
+
+// export default function HomeClient({ searchParams }) {
+//   console.log('HomeClient rendering');
+  
+//   // Debug logging
+//   const authContext = useAuth();
+//   console.log('HomeClient - Auth context received:', authContext);
+  
+//   if (!authContext || authContext.loading) {
+//     return (
+//       <div className="min-h-screen bg-blue-900 flex items-center justify-center">
+//         <div className="text-white text-center">
+//           <h1 className="text-2xl mb-4">Loading...</h1>
+//           <p>Auth context loading: {authContext ? authContext.loading.toString() : 'undefined'}</p>
+//         </div>
+//       </div>
+//     );
+//   }
+
+//   const { currentUser } = authContext;
+
+//   return (
+//     <div className="min-h-screen bg-gradient-to-br from-slate-900 via-purple-900 to-slate-900">
+//       {/* Simple test content */}
+//       <div className="text-center py-12">
+//         <h1 className="text-4xl font-bold text-white mb-4">
+//           🎉 Authentication Context Working! 🎉
+//         </h1>
+//         <p className="text-xl text-white/80">
+//           Current User: {currentUser ? currentUser.email || 'User logged in' : 'Not logged in'}
+//         </p>
+//         <div className="mt-8 text-white/60 text-sm">
+//           <p>Context loaded successfully!</p>
+//           <p>Loading: {authContext.loading ? 'true' : 'false'}</p>
+//         </div>
+//       </div>
+//     </div>
+//   );
+// }

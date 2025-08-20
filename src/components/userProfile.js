@@ -3,7 +3,7 @@
 // components/UserProfile.js
 
 import { useState } from 'react';
-import { useAuth } from '@/app/Contexts/AuthContext';
+import { useAuth } from '@/Contexts/AuthContext';
 import { User, LogOut, Settings } from 'lucide-react';
 
 export default function UserProfile() {

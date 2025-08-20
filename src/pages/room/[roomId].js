@@ -1,132 +1,689 @@
-// pages/room/[roomId].js
+// pages/room/[roomId].js - Quick Fixed Room Component
+import { useEffect, useState, useRef, useCallback } from 'react';
 import { useRouter } from 'next/router';
-import { useEffect, useState } from 'react';
-import { LiveKitRoom, VideoConference, formatChatMessageLinks } from '@livekit/components-react';
-import '@livekit/components-styles';
+import { useAuth } from '@/Contexts/AuthContext';
+import GuestNameModal from '@/components/GuestNameModal';
+import { 
+  Room, 
+  RoomEvent,
+  Track,
+  VideoPresets
+} from 'livekit-client';
+import { 
+  Mic, 
+  MicOff, 
+  Video, 
+  VideoOff, 
+  PhoneOff,
+  Users,
+  Copy,
+  Share2,
+  Monitor
+} from 'lucide-react';
+import toast from 'react-hot-toast';
+import { motion, AnimatePresence } from 'framer-motion';
 
-export default function Room() {
+export default function VideoRoom() {
   const router = useRouter();
-  const { roomId } = router.query;
-  const [token, setToken] = useState('');
-  const [wsUrl, setWsUrl] = useState('');
-  const [identity, setIdentity] = useState('');
-  const [isLoading, setIsLoading] = useState(true);
-  const [error, setError] = useState('');
+  const { roomId, token } = router.query;
+  const { currentUser } = useAuth() || {};
+  
+  const [room, setRoom] = useState(null);
+  const [participants, setParticipants] = useState([]);
+  const [isConnected, setIsConnected] = useState(false);
+  const [isMuted, setIsMuted] = useState(false);
+  const [isVideoOff, setIsVideoOff] = useState(false);
+  const [isConnecting, setIsConnecting] = useState(false);
+  const [showGuestModal, setShowGuestModal] = useState(false);
+  const [localIdentity, setLocalIdentity] = useState('');
+  const [isScreenSharing, setIsScreenSharing] = useState(false);
+  const [showControls, setShowControls] = useState(true);
+  const [showParticipants, setShowParticipants] = useState(false);
+  const [connectionError, setConnectionError] = useState(null);
 
+  const localVideoRef = useRef(null);
+  const remoteVideoRefs = useRef({});
+  const controlsTimeoutRef = useRef(null);
+  const connectionAttempted = useRef(false);
+
+  // Check if user needs to enter name (for guests)
   useEffect(() => {
-    if (!roomId) return;
+    if (!roomId || connectionAttempted.current) return;
 
-    // Try to get meeting data from localStorage first
-    const meetingData = localStorage.getItem('meetingData');
-    if (meetingData) {
-      try {
-        const data = JSON.parse(meetingData);
-        if (data.roomName === roomId) {
-          setToken(data.token);
-          setWsUrl(data.livekitUrl);
-          setIdentity(data.identity);
-          setIsLoading(false);
-          return;
-        }
-      } catch (e) {
-        console.error('Error parsing meeting data:', e);
-      }
+    if (!currentUser && !token) {
+      setShowGuestModal(true);
+      return;
     }
 
-    // If no meeting data in localStorage, generate new token
-    generateToken();
-  }, [roomId]);
+    connectionAttempted.current = true;
 
-  const generateToken = async () => {
+    if (currentUser && !token) {
+      const identity = getUserIdentity(currentUser);
+      fetchTokenAndConnect(identity);
+    } else if (token) {
+      const identity = currentUser 
+        ? getUserIdentity(currentUser)
+        : sessionStorage.getItem('guestName') || 'Guest';
+      setLocalIdentity(identity);
+      connectToRoom(token);
+    }
+  }, [roomId, token, currentUser]);
+
+  const getUserIdentity = (user) => {
+    return user.displayName || user.email?.split('@')[0] || `User-${user.uid.substring(0, 8)}`;
+  };
+
+  const fetchTokenAndConnect = async (identity) => {
     try {
-      const identity = `user-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`;
-      
-      const response = await fetch(`/api/token?identity=${identity}&roomName=${roomId}`);
-      
-      if (!response.ok) {
-        throw new Error('Failed to get token');
-      }
-
+      setConnectionError(null);
+      const response = await fetch(`/api/token?identity=${encodeURIComponent(identity)}&roomName=${roomId}`);
       const data = await response.json();
       
-      setToken(data.token);
-      setWsUrl(data.LIVEKIT_URL);
-      setIdentity(data.identity);
-      setIsLoading(false);
+      if (data.token) {
+        setLocalIdentity(identity);
+        await connectToRoom(data.token);
+      } else {
+        throw new Error('Failed to get access token');
+      }
     } catch (error) {
-      console.error('Error generating token:', error);
-      setError('Failed to join room. Please try again.');
-      setIsLoading(false);
+      console.error('Failed to fetch token:', error);
+      setConnectionError(error.message);
+      toast.error('Failed to connect to meeting');
     }
   };
 
-  const handleDisconnect = () => {
-    // Clean up localStorage and redirect to home
-    localStorage.removeItem('meetingData');
+  const handleGuestJoin = (tokenReceived, identity) => {
+    const cleanIdentity = identity.replace('guest-', '').split('-')[0];
+    setLocalIdentity(cleanIdentity);
+    setShowGuestModal(false);
+    connectionAttempted.current = true;
+    connectToRoom(tokenReceived);
+  };
+
+  const connectToRoom = async (roomToken) => {
+    setIsConnecting(true);
+    setConnectionError(null);
+    
+    try {
+      const newRoom = new Room({
+        adaptiveStream: true,
+        dynacast: true,
+        videoCaptureDefaults: {
+          resolution: VideoPresets.h720.resolution,
+          frameRate: 30,
+        },
+        audioCaptureDefaults: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
+      });
+
+      // Set up event listeners
+      newRoom
+        .on(RoomEvent.ParticipantConnected, onParticipantConnected)
+        .on(RoomEvent.ParticipantDisconnected, onParticipantDisconnected)
+        .on(RoomEvent.TrackSubscribed, onTrackSubscribed)
+        .on(RoomEvent.TrackUnsubscribed, onTrackUnsubscribed)
+        .on(RoomEvent.LocalTrackPublished, onLocalTrackPublished)
+        .on(RoomEvent.Disconnected, onDisconnected);
+
+      // Connect to the room
+      const wsUrl = process.env.NEXT_PUBLIC_LIVEKIT_URL;
+      await newRoom.connect(wsUrl, roomToken);
+      
+      setRoom(newRoom);
+      setIsConnected(true);
+      setIsConnecting(false);
+      
+      // Enable camera and microphone with user gesture
+      const enableMedia = async () => {
+        try {
+          await newRoom.localParticipant.enableCameraAndMicrophone();
+        } catch (mediaError) {
+          console.warn('Media access error:', mediaError);
+          toast.error('Could not access camera or microphone');
+        }
+      };
+
+      // Enable media on first user interaction
+      const handleFirstClick = () => {
+        enableMedia();
+        document.removeEventListener('click', handleFirstClick, true);
+      };
+      document.addEventListener('click', handleFirstClick, true);
+      
+      toast.success('Connected to meeting!');
+    } catch (error) {
+      console.error('Failed to connect to room:', error);
+      setConnectionError(error.message);
+      toast.error('Failed to connect to meeting');
+      setIsConnecting(false);
+    }
+  };
+
+  const onParticipantConnected = useCallback((participant) => {
+    console.log('Participant connected:', participant.identity);
+    setParticipants(prev => [...prev.filter(p => p.identity !== participant.identity), participant]);
+    
+    const displayName = getParticipantDisplayName(participant.identity);
+    toast.success(`${displayName} joined`, { icon: '👋', duration: 3000 });
+  }, []);
+
+  const onParticipantDisconnected = useCallback((participant) => {
+    console.log('Participant disconnected:', participant.identity);
+    setParticipants(prev => prev.filter(p => p.identity !== participant.identity));
+    
+    const displayName = getParticipantDisplayName(participant.identity);
+    toast.error(`${displayName} left`, { icon: '👋', duration: 3000 });
+    
+    if (remoteVideoRefs.current[participant.identity]) {
+      delete remoteVideoRefs.current[participant.identity];
+    }
+  }, []);
+
+  const onTrackSubscribed = useCallback((track, publication, participant) => {
+    if (track.kind === Track.Kind.Video) {
+      setTimeout(() => {
+        const videoElement = remoteVideoRefs.current[participant.identity];
+        if (videoElement) {
+          track.attach(videoElement);
+        }
+      }, 100);
+    } else if (track.kind === Track.Kind.Audio) {
+      track.attach();
+    }
+  }, []);
+
+  const onTrackUnsubscribed = useCallback((track) => {
+    track.detach();
+  }, []);
+
+  const onLocalTrackPublished = useCallback((publication) => {
+    if (publication.kind === Track.Kind.Video && localVideoRef.current) {
+      publication.track?.attach(localVideoRef.current);
+    }
+  }, []);
+
+  const onDisconnected = useCallback(() => {
+    setIsConnected(false);
+    setRoom(null);
+    setParticipants([]);
+    toast.error('Disconnected from meeting');
+    router.push('/');
+  }, [router]);
+
+  const getParticipantDisplayName = (identity) => {
+    if (identity.startsWith('guest-')) {
+      return identity.replace('guest-', '').split('-')[0];
+    }
+    return identity;
+  };
+
+  const getParticipantInitials = (identity) => {
+    const name = getParticipantDisplayName(identity);
+    return name.split(' ').map(n => n[0]).join('').toUpperCase().substring(0, 2) || 'U';
+  };
+
+  const toggleMute = async () => {
+    if (!room) return;
+    
+    try {
+      await room.localParticipant.setMicrophoneEnabled(isMuted);
+      setIsMuted(!isMuted);
+    } catch (error) {
+      console.error('Error toggling microphone:', error);
+      toast.error('Failed to toggle microphone');
+    }
+  };
+
+  const toggleVideo = async () => {
+    if (!room) return;
+    
+    try {
+      await room.localParticipant.setCameraEnabled(isVideoOff);
+      setIsVideoOff(!isVideoOff);
+    } catch (error) {
+      console.error('Error toggling camera:', error);
+      toast.error('Failed to toggle camera');
+    }
+  };
+
+  const toggleScreenShare = async () => {
+    if (!room) return;
+
+    try {
+      if (isScreenSharing) {
+        await room.localParticipant.setScreenShareEnabled(false);
+        setIsScreenSharing(false);
+        toast.success('Screen sharing stopped');
+      } else {
+        await room.localParticipant.setScreenShareEnabled(true);
+        setIsScreenSharing(true);
+        toast.success('Screen sharing started');
+      }
+    } catch (error) {
+      console.error('Error toggling screen share:', error);
+      toast.error('Failed to toggle screen share');
+    }
+  };
+
+  const leaveRoom = () => {
+    if (room) {
+      room.disconnect();
+    }
     router.push('/');
   };
 
-  if (isLoading) {
+  const copyRoomId = async () => {
+    try {
+      await navigator.clipboard.writeText(roomId);
+      toast.success('Room ID copied to clipboard!');
+    } catch (error) {
+      toast.error('Failed to copy room ID');
+    }
+  };
+
+  const shareRoom = async () => {
+    const shareUrl = `${window.location.origin}/room/${roomId}`;
+    
+    if (navigator.share) {
+      try {
+        await navigator.share({
+          title: 'Join my meeting',
+          text: `Join my video meeting: ${roomId}`,
+          url: shareUrl,
+        });
+      } catch (error) {
+        if (error.name !== 'AbortError') {
+          copyRoomId();
+        }
+      }
+    } else {
+      await navigator.clipboard.writeText(shareUrl);
+      toast.success('Meeting link copied to clipboard!');
+    }
+  };
+
+  // Auto-hide controls
+  useEffect(() => {
+    const resetTimeout = () => {
+      setShowControls(true);
+      if (controlsTimeoutRef.current) {
+        clearTimeout(controlsTimeoutRef.current);
+      }
+      controlsTimeoutRef.current = setTimeout(() => {
+        setShowControls(false);
+      }, 3000);
+    };
+
+    const handleMouseMove = () => resetTimeout();
+    
+    resetTimeout();
+    document.addEventListener('mousemove', handleMouseMove);
+    
+    return () => {
+      document.removeEventListener('mousemove', handleMouseMove);
+      if (controlsTimeoutRef.current) {
+        clearTimeout(controlsTimeoutRef.current);
+      }
+    };
+  }, []);
+
+  const isParticipantMuted = (participant) => {
+    const audioTrack = participant.audioTrackPublications.values().next().value;
+    return !audioTrack || audioTrack.isMuted;
+  };
+
+  const isParticipantVideoOff = (participant) => {
+    const videoTrack = participant.videoTrackPublications.values().next().value;
+    return !videoTrack || videoTrack.isMuted;
+  };
+
+  // Show guest modal for unauthenticated users
+  if (showGuestModal) {
+    return <GuestNameModal isOpen={true} onJoin={handleGuestJoin} roomId={roomId} />;
+  }
+
+  if (isConnecting) {
     return (
-      <div className="min-h-screen bg-gradient-to-br from-purple-900 via-blue-900 to-indigo-900 flex items-center justify-center">
-        <div className="text-center">
-          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-white mx-auto mb-4"></div>
-          <p className="text-white text-lg">Joining room...</p>
-        </div>
+      <div className="min-h-screen bg-gradient-to-br from-slate-900 via-purple-900 to-slate-900 flex items-center justify-center">
+        <motion.div 
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="text-center text-white"
+        >
+          <div className="animate-spin rounded-full h-16 w-16 border-b-2 border-white mx-auto mb-4"></div>
+          <p className="text-xl">Connecting to meeting...</p>
+          <p className="text-white/60 mt-2">Room: {roomId}</p>
+        </motion.div>
       </div>
     );
   }
 
-  if (error) {
+  if (connectionError) {
     return (
-      <div className="min-h-screen bg-gradient-to-br from-purple-900 via-blue-900 to-indigo-900 flex items-center justify-center">
-        <div className="text-center">
-          <div className="bg-red-500/20 border border-red-500 rounded-lg p-6 max-w-md">
-            <h2 className="text-red-400 text-xl font-semibold mb-2">Error</h2>
-            <p className="text-white mb-4">{error}</p>
+      <div className="min-h-screen bg-gradient-to-br from-slate-900 via-purple-900 to-slate-900 flex items-center justify-center">
+        <motion.div 
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="text-center text-white"
+        >
+          <p className="text-xl mb-4">Failed to connect to meeting</p>
+          <p className="text-white/60 mb-6">{connectionError}</p>
+          <div className="space-x-4">
+            <button
+              onClick={() => {
+                connectionAttempted.current = false;
+                setConnectionError(null);
+                window.location.reload();
+              }}
+              className="px-6 py-3 bg-blue-500 hover:bg-blue-600 rounded-lg transition-colors"
+            >
+              Retry
+            </button>
             <button
               onClick={() => router.push('/')}
-              className="bg-red-500 hover:bg-red-600 text-white px-4 py-2 rounded-lg transition-colors"
+              className="px-6 py-3 bg-gray-500 hover:bg-gray-600 rounded-lg transition-colors"
             >
-              Back to Home
+              Go Back
             </button>
           </div>
-        </div>
+        </motion.div>
       </div>
     );
   }
 
-  if (!token || !wsUrl) {
+  if (!isConnected) {
     return (
-      <div className="min-h-screen bg-gradient-to-br from-purple-900 via-blue-900 to-indigo-900 flex items-center justify-center">
-        <div className="text-center">
-          <p className="text-white text-lg">Unable to connect to room</p>
+      <div className="min-h-screen bg-gradient-to-br from-slate-900 via-purple-900 to-slate-900 flex items-center justify-center">
+        <motion.div 
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="text-center text-white"
+        >
+          <div className="animate-spin rounded-full h-16 w-16 border-b-2 border-white mx-auto mb-4"></div>
+          <p className="text-xl mb-4">Initializing meeting...</p>
           <button
-            onClick={() => router.push('/')}
-            className="mt-4 bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded-lg transition-colors"
+            onClick={() => {
+              connectionAttempted.current = false;
+              window.location.reload();
+            }}
+            className="px-4 py-2 bg-blue-500 hover:bg-blue-600 rounded transition-colors text-sm"
           >
-            Back to Home
+            Refresh if stuck
           </button>
-        </div>
+        </motion.div>
       </div>
     );
   }
 
   return (
-    <div className="min-h-screen bg-black">
-      <LiveKitRoom
-        video={true}
-        audio={true}
-        token={token}
-        serverUrl={wsUrl}
-        data-lk-theme="default"
-        style={{ height: '100vh' }}
-        onDisconnected={handleDisconnect}
-      >
-        <VideoConference 
-          chatMessageFormatter={formatChatMessageLinks}
-        />
-      </LiveKitRoom>
+    <div className="min-h-screen bg-gradient-to-br from-slate-900 via-purple-900 to-slate-900 relative">
+      {/* Header */}
+      <AnimatePresence>
+        {showControls && (
+          <motion.div
+            initial={{ opacity: 0, y: -50 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -50 }}
+            className="absolute top-0 left-0 right-0 bg-black/30 backdrop-blur-lg border-b border-white/10 p-4 z-40"
+          >
+            <div className="max-w-7xl mx-auto flex items-center justify-between">
+              <div className="flex items-center space-x-4">
+                <h1 className="text-xl font-bold text-white">MeetSpace</h1>
+                <div className="flex items-center space-x-2">
+                  <span className="text-white/70 text-sm">ID:</span>
+                  <code className="bg-white/10 px-2 py-1 rounded text-white font-mono text-sm">
+                    {roomId}
+                  </code>
+                  <button
+                    onClick={copyRoomId}
+                    className="p-1 hover:bg-white/20 rounded transition-colors"
+                    title="Copy Room ID"
+                  >
+                    <Copy className="w-4 h-4 text-white" />
+                  </button>
+                  <button
+                    onClick={shareRoom}
+                    className="p-1 hover:bg-white/20 rounded transition-colors"
+                    title="Share Meeting"
+                  >
+                    <Share2 className="w-4 h-4 text-white" />
+                  </button>
+                </div>
+              </div>
+              
+              <button
+                onClick={() => setShowParticipants(!showParticipants)}
+                className="flex items-center space-x-2 text-white bg-white/10 hover:bg-white/20 px-3 py-2 rounded-lg transition-colors"
+              >
+                <Users className="w-4 h-4" />
+                <span className="text-sm">{participants.length + 1}</span>
+              </button>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Video Grid */}
+      <div className="h-screen p-4 pt-20">
+        <div className="h-full max-w-7xl mx-auto">
+          {participants.length === 0 ? (
+            // Single participant view
+            <div className="h-full flex items-center justify-center">
+              <motion.div
+                initial={{ opacity: 0, scale: 0.8 }}
+                animate={{ opacity: 1, scale: 1 }}
+                className="relative w-full max-w-4xl aspect-video bg-black/30 rounded-3xl overflow-hidden border border-white/10 shadow-2xl"
+              >
+                <video
+                  ref={localVideoRef}
+                  className="w-full h-full object-cover"
+                  autoPlay
+                  muted
+                  playsInline
+                />
+                {isVideoOff && (
+                  <div className="absolute inset-0 bg-gradient-to-br from-blue-500/20 to-purple-500/20 flex items-center justify-center">
+                    <div className="text-center text-white">
+                      {currentUser?.photoURL ? (
+                        <img
+                          src={currentUser.photoURL}
+                          alt={localIdentity}
+                          className="w-24 h-24 rounded-full mx-auto mb-4 border-4 border-white/20"
+                        />
+                      ) : (
+                        <div className="w-24 h-24 bg-gradient-to-r from-blue-500 to-purple-600 rounded-full flex items-center justify-center mx-auto mb-4 border-4 border-white/20">
+                          <span className="text-white text-2xl font-bold">
+                            {getParticipantInitials(localIdentity)}
+                          </span>
+                        </div>
+                      )}
+                      <p className="text-lg font-medium">{localIdentity}</p>
+                      <p className="text-white/60">Camera is off</p>
+                    </div>
+                  </div>
+                )}
+                <div className="absolute bottom-6 left-6">
+                  <div className="bg-black/60 backdrop-blur-sm px-4 py-2 rounded-full flex items-center space-x-2">
+                    <div className="w-2 h-2 bg-green-400 rounded-full"></div>
+                    <span className="text-white font-medium">{localIdentity}</span>
+                    {isMuted && <MicOff className="w-4 h-4 text-red-400" />}
+                  </div>
+                </div>
+              </motion.div>
+            </div>
+          ) : (
+            // Multi-participant grid
+            <div className={`grid gap-4 h-full ${
+              participants.length === 1 ? 'grid-cols-2' :
+              participants.length <= 4 ? 'grid-cols-2 grid-rows-2' :
+              participants.length <= 6 ? 'grid-cols-3 grid-rows-2' :
+              'grid-cols-3 grid-rows-3'
+            }`}>
+              {/* Local Video */}
+              <motion.div
+                initial={{ opacity: 0, scale: 0.8 }}
+                animate={{ opacity: 1, scale: 1 }}
+                className="relative bg-black/30 rounded-2xl overflow-hidden border border-white/10"
+              >
+                <video
+                  ref={localVideoRef}
+                  className="w-full h-full object-cover"
+                  autoPlay
+                  muted
+                  playsInline
+                />
+                {isVideoOff && (
+                  <div className="absolute inset-0 bg-gradient-to-br from-blue-500/20 to-purple-500/20 flex items-center justify-center">
+                    <div className="text-center text-white">
+                      {currentUser?.photoURL ? (
+                        <img
+                          src={currentUser.photoURL}
+                          alt={localIdentity}
+                          className="w-16 h-16 rounded-full mx-auto mb-2 border-2 border-white/20"
+                        />
+                      ) : (
+                        <div className="w-16 h-16 bg-gradient-to-r from-blue-500 to-purple-600 rounded-full flex items-center justify-center mx-auto mb-2 border-2 border-white/20">
+                          <span className="text-white text-xl font-bold">
+                            {getParticipantInitials(localIdentity)}
+                          </span>
+                        </div>
+                      )}
+                      <p className="text-sm font-medium">{localIdentity}</p>
+                    </div>
+                  </div>
+                )}
+                <div className="absolute bottom-3 left-3">
+                  <div className="bg-black/60 backdrop-blur-sm px-3 py-1 rounded-full flex items-center space-x-1">
+                    <div className="w-1.5 h-1.5 bg-green-400 rounded-full"></div>
+                    <span className="text-white text-sm font-medium">{localIdentity}</span>
+                    {isMuted && <MicOff className="w-3 h-3 text-red-400" />}
+                  </div>
+                </div>
+              </motion.div>
+
+              {/* Remote Videos */}
+              {participants.map((participant, index) => (
+                <motion.div
+                  key={participant.identity}
+                  initial={{ opacity: 0, scale: 0.8 }}
+                  animate={{ opacity: 1, scale: 1 }}
+                  transition={{ delay: index * 0.1 }}
+                  className="relative bg-black/30 rounded-2xl overflow-hidden border border-white/10"
+                >
+                  <video
+                    ref={el => {
+                      if (el) remoteVideoRefs.current[participant.identity] = el;
+                    }}
+                    className="w-full h-full object-cover"
+                    autoPlay
+                    playsInline
+                  />
+                  {isParticipantVideoOff(participant) && (
+                    <div className="absolute inset-0 bg-gradient-to-br from-purple-500/20 to-pink-500/20 flex items-center justify-center">
+                      <div className="text-center text-white">
+                        <div className="w-16 h-16 bg-gradient-to-r from-purple-500 to-pink-500 rounded-full flex items-center justify-center mx-auto mb-2 border-2 border-white/20">
+                          <span className="text-white text-xl font-bold">
+                            {getParticipantInitials(participant.identity)}
+                          </span>
+                        </div>
+                        <p className="text-sm font-medium">
+                          {getParticipantDisplayName(participant.identity)}
+                        </p>
+                      </div>
+                    </div>
+                  )}
+                  <div className="absolute bottom-3 left-3">
+                    <div className="bg-black/60 backdrop-blur-sm px-3 py-1 rounded-full flex items-center space-x-1">
+                      <div className="w-1.5 h-1.5 bg-green-400 rounded-full"></div>
+                      <span className="text-white text-sm font-medium">
+                        {getParticipantDisplayName(participant.identity)}
+                      </span>
+                      {isParticipantMuted(participant) && <MicOff className="w-3 h-3 text-red-400" />}
+                    </div>
+                  </div>
+                </motion.div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Controls */}
+      <AnimatePresence>
+        {showControls && (
+          <motion.div
+            initial={{ opacity: 0, y: 50 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: 50 }}
+            className="absolute bottom-0 left-0 right-0 bg-black/30 backdrop-blur-lg border-t border-white/10 p-6 z-40"
+          >
+            <div className="max-w-2xl mx-auto flex items-center justify-center space-x-4">
+              <motion.button
+                whileHover={{ scale: 1.05 }}
+                whileTap={{ scale: 0.95 }}
+                onClick={toggleMute}
+                className={`p-4 rounded-full transition-all ${
+                  isMuted 
+                    ? 'bg-red-500 hover:bg-red-600' 
+                    : 'bg-white/20 hover:bg-white/30'
+                } backdrop-blur-sm`}
+                title={isMuted ? 'Unmute' : 'Mute'}
+              >
+                {isMuted ? (
+                  <MicOff className="w-6 h-6 text-white" />
+                ) : (
+                  <Mic className="w-6 h-6 text-white" />
+                )}
+              </motion.button>
+
+              <motion.button
+                whileHover={{ scale: 1.05 }}
+                whileTap={{ scale: 0.95 }}
+                onClick={toggleVideo}
+                className={`p-4 rounded-full transition-all ${
+                  isVideoOff 
+                    ? 'bg-red-500 hover:bg-red-600' 
+                    : 'bg-white/20 hover:bg-white/30'
+                } backdrop-blur-sm`}
+                title={isVideoOff ? 'Turn on camera' : 'Turn off camera'}
+              >
+                {isVideoOff ? (
+                  <VideoOff className="w-6 h-6 text-white" />
+                ) : (
+                  <Video className="w-6 h-6 text-white" />
+                )}
+              </motion.button>
+
+              <motion.button
+                whileHover={{ scale: 1.05 }}
+                whileTap={{ scale: 0.95 }}
+                onClick={toggleScreenShare}
+                className={`p-4 rounded-full transition-all ${
+                  isScreenSharing 
+                    ? 'bg-blue-500 hover:bg-blue-600' 
+                    : 'bg-white/20 hover:bg-white/30'
+                } backdrop-blur-sm`}
+                title={isScreenSharing ? 'Stop sharing' : 'Share screen'}
+              >
+                <Monitor className="w-6 h-6 text-white" />
+              </motion.button>
+
+              <motion.button
+                whileHover={{ scale: 1.05 }}
+                whileTap={{ scale: 0.95 }}
+                onClick={leaveRoom}
+                className="p-4 rounded-full bg-red-500 hover:bg-red-600 transition-colors backdrop-blur-sm"
+                title="Leave meeting"
+              >
+                <PhoneOff className="w-6 h-6 text-white" />
+              </motion.button>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }
