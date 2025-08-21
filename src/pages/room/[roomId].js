@@ -1,4 +1,4 @@
-// pages/room/[roomId].js - Quick Fixed Room Component
+// pages/room/[roomId].js - Fixed Room Component
 import { useEffect, useState, useRef, useCallback } from 'react';
 import { useRouter } from 'next/router';
 import { useAuth } from '@/Contexts/AuthContext';
@@ -126,6 +126,9 @@ export default function VideoRoom() {
         .on(RoomEvent.TrackSubscribed, onTrackSubscribed)
         .on(RoomEvent.TrackUnsubscribed, onTrackUnsubscribed)
         .on(RoomEvent.LocalTrackPublished, onLocalTrackPublished)
+        .on(RoomEvent.LocalTrackUnpublished, onLocalTrackUnpublished)
+        .on(RoomEvent.TrackMuted, onTrackMuted)
+        .on(RoomEvent.TrackUnmuted, onTrackUnmuted)
         .on(RoomEvent.Disconnected, onDisconnected);
 
       // Connect to the room
@@ -136,22 +139,17 @@ export default function VideoRoom() {
       setIsConnected(true);
       setIsConnecting(false);
       
-      // Enable camera and microphone with user gesture
-      const enableMedia = async () => {
-        try {
-          await newRoom.localParticipant.enableCameraAndMicrophone();
-        } catch (mediaError) {
-          console.warn('Media access error:', mediaError);
-          toast.error('Could not access camera or microphone');
-        }
-      };
-
-      // Enable media on first user interaction
-      const handleFirstClick = () => {
-        enableMedia();
-        document.removeEventListener('click', handleFirstClick, true);
-      };
-      document.addEventListener('click', handleFirstClick, true);
+      // Initialize participants list with existing participants
+      const existingParticipants = Array.from(newRoom.remoteParticipants.values());
+      setParticipants(existingParticipants);
+      
+      // Enable camera and microphone
+      try {
+        await newRoom.localParticipant.enableCameraAndMicrophone();
+      } catch (mediaError) {
+        console.warn('Media access error:', mediaError);
+        toast.error('Could not access camera or microphone');
+      }
       
       toast.success('Connected to meeting!');
     } catch (error) {
@@ -164,7 +162,10 @@ export default function VideoRoom() {
 
   const onParticipantConnected = useCallback((participant) => {
     console.log('Participant connected:', participant.identity);
-    setParticipants(prev => [...prev.filter(p => p.identity !== participant.identity), participant]);
+    setParticipants(prev => {
+      const filtered = prev.filter(p => p.identity !== participant.identity);
+      return [...filtered, participant];
+    });
     
     const displayName = getParticipantDisplayName(participant.identity);
     toast.success(`${displayName} joined`, { icon: '👋', duration: 3000 });
@@ -183,26 +184,64 @@ export default function VideoRoom() {
   }, []);
 
   const onTrackSubscribed = useCallback((track, publication, participant) => {
-    if (track.kind === Track.Kind.Video) {
+    console.log('Track subscribed:', track.kind, participant.identity);
+    
+    if (track.kind === Track.Kind.Video || track.kind === Track.Kind.ScreenShare) {
+      // Use a slight delay to ensure the DOM element exists
       setTimeout(() => {
         const videoElement = remoteVideoRefs.current[participant.identity];
-        if (videoElement) {
-          track.attach(videoElement);
+        if (videoElement && track.mediaStream) {
+          videoElement.srcObject = track.mediaStream;
         }
       }, 100);
     } else if (track.kind === Track.Kind.Audio) {
-      track.attach();
+      // Audio tracks should be attached to play automatically
+      const audioElement = document.createElement('audio');
+      audioElement.autoplay = true;
+      if (track.mediaStream) {
+        audioElement.srcObject = track.mediaStream;
+      }
+      document.body.appendChild(audioElement);
     }
   }, []);
 
-  const onTrackUnsubscribed = useCallback((track) => {
-    track.detach();
+  const onTrackUnsubscribed = useCallback((track, publication, participant) => {
+    console.log('Track unsubscribed:', track.kind, participant.identity);
+    
+    if (track.kind === Track.Kind.Video || track.kind === Track.Kind.ScreenShare) {
+      const videoElement = remoteVideoRefs.current[participant.identity];
+      if (videoElement) {
+        videoElement.srcObject = null;
+      }
+    }
   }, []);
 
-  const onLocalTrackPublished = useCallback((publication) => {
+  const onLocalTrackPublished = useCallback((publication, participant) => {
+    console.log('Local track published:', publication.kind);
+    
+    if (publication.kind === Track.Kind.Video && localVideoRef.current && publication.track) {
+      localVideoRef.current.srcObject = publication.track.mediaStream;
+    }
+  }, []);
+
+  const onLocalTrackUnpublished = useCallback((publication) => {
+    console.log('Local track unpublished:', publication.kind);
+    
     if (publication.kind === Track.Kind.Video && localVideoRef.current) {
-      publication.track?.attach(localVideoRef.current);
+      localVideoRef.current.srcObject = null;
     }
+  }, []);
+
+  const onTrackMuted = useCallback((publication, participant) => {
+    console.log('Track muted:', publication.kind, participant?.identity || 'local');
+    // Force re-render to update UI
+    setParticipants(prev => [...prev]);
+  }, []);
+
+  const onTrackUnmuted = useCallback((publication, participant) => {
+    console.log('Track unmuted:', publication.kind, participant?.identity || 'local');
+    // Force re-render to update UI
+    setParticipants(prev => [...prev]);
   }, []);
 
   const onDisconnected = useCallback(() => {
@@ -305,7 +344,7 @@ export default function VideoRoom() {
     }
   };
 
-  // Auto-hide controls
+  // Auto-hide controls with longer timeout for mobile
   useEffect(() => {
     const resetTimeout = () => {
       setShowControls(true);
@@ -314,16 +353,20 @@ export default function VideoRoom() {
       }
       controlsTimeoutRef.current = setTimeout(() => {
         setShowControls(false);
-      }, 3000);
+      }, 5000); // Increased timeout
     };
 
-    const handleMouseMove = () => resetTimeout();
+    const handleInteraction = () => resetTimeout();
     
     resetTimeout();
-    document.addEventListener('mousemove', handleMouseMove);
+    document.addEventListener('mousemove', handleInteraction);
+    document.addEventListener('touchstart', handleInteraction);
+    document.addEventListener('click', handleInteraction);
     
     return () => {
-      document.removeEventListener('mousemove', handleMouseMove);
+      document.removeEventListener('mousemove', handleInteraction);
+      document.removeEventListener('touchstart', handleInteraction);
+      document.removeEventListener('click', handleInteraction);
       if (controlsTimeoutRef.current) {
         clearTimeout(controlsTimeoutRef.current);
       }
@@ -331,13 +374,19 @@ export default function VideoRoom() {
   }, []);
 
   const isParticipantMuted = (participant) => {
-    const audioTrack = participant.audioTrackPublications.values().next().value;
+    const audioTrack = Array.from(participant.audioTrackPublications.values())[0];
     return !audioTrack || audioTrack.isMuted;
   };
 
   const isParticipantVideoOff = (participant) => {
-    const videoTrack = participant.videoTrackPublications.values().next().value;
+    const videoTrack = Array.from(participant.videoTrackPublications.values())[0];
     return !videoTrack || videoTrack.isMuted;
+  };
+
+  const hasScreenShare = (participant) => {
+    return Array.from(participant.trackPublications.values()).some(
+      pub => pub.source === Track.Source.ScreenShare
+    );
   };
 
   // Show guest modal for unauthenticated users
@@ -419,7 +468,7 @@ export default function VideoRoom() {
   }
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-900 via-purple-900 to-slate-900 relative">
+    <div className="h-screen bg-gradient-to-br from-slate-900 via-purple-900 to-slate-900 relative flex flex-col overflow-hidden">
       {/* Header */}
       <AnimatePresence>
         {showControls && (
@@ -427,7 +476,7 @@ export default function VideoRoom() {
             initial={{ opacity: 0, y: -50 }}
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: -50 }}
-            className="absolute top-0 left-0 right-0 bg-black/30 backdrop-blur-lg border-b border-white/10 p-4 z-40"
+            className="bg-black/30 backdrop-blur-lg border-b border-white/10 p-4 z-40 flex-shrink-0"
           >
             <div className="max-w-7xl mx-auto flex items-center justify-between">
               <div className="flex items-center space-x-4">
@@ -466,8 +515,8 @@ export default function VideoRoom() {
         )}
       </AnimatePresence>
 
-      {/* Video Grid */}
-      <div className="h-screen p-4 pt-20">
+      {/* Video Grid - Takes remaining space with safe area */}
+      <div className="flex-1 p-4 pb-32" style={{ paddingBottom: 'max(8rem, calc(8rem + env(safe-area-inset-bottom)))' }}>
         <div className="h-full max-w-7xl mx-auto">
           {participants.length === 0 ? (
             // Single participant view
@@ -475,7 +524,7 @@ export default function VideoRoom() {
               <motion.div
                 initial={{ opacity: 0, scale: 0.8 }}
                 animate={{ opacity: 1, scale: 1 }}
-                className="relative w-full max-w-4xl aspect-video bg-black/30 rounded-3xl overflow-hidden border border-white/10 shadow-2xl"
+                className="relative w-full max-w-2xl aspect-square bg-black/30 rounded-3xl overflow-hidden border border-white/10 shadow-2xl"
               >
                 <video
                   ref={localVideoRef}
@@ -515,18 +564,18 @@ export default function VideoRoom() {
               </motion.div>
             </div>
           ) : (
-            // Multi-participant grid
-            <div className={`grid gap-4 h-full ${
-              participants.length === 1 ? 'grid-cols-2' :
+            // Multi-participant grid with better responsive design
+            <div className={`grid gap-2 sm:gap-4 h-full ${
+              participants.length === 1 ? 'grid-cols-1 sm:grid-cols-2' :
               participants.length <= 4 ? 'grid-cols-2 grid-rows-2' :
-              participants.length <= 6 ? 'grid-cols-3 grid-rows-2' :
-              'grid-cols-3 grid-rows-3'
+              participants.length <= 6 ? 'grid-cols-2 sm:grid-cols-3 grid-rows-2 sm:grid-rows-2' :
+              'grid-cols-2 sm:grid-cols-3 grid-rows-3'
             }`}>
               {/* Local Video */}
               <motion.div
                 initial={{ opacity: 0, scale: 0.8 }}
                 animate={{ opacity: 1, scale: 1 }}
-                className="relative bg-black/30 rounded-2xl overflow-hidden border border-white/10"
+                className="relative bg-black/30 rounded-xl sm:rounded-2xl overflow-hidden border border-white/10 aspect-square"
               >
                 <video
                   ref={localVideoRef}
@@ -542,26 +591,34 @@ export default function VideoRoom() {
                         <img
                           src={currentUser.photoURL}
                           alt={localIdentity}
-                          className="w-16 h-16 rounded-full mx-auto mb-2 border-2 border-white/20"
+                          className="w-12 h-12 sm:w-16 sm:h-16 rounded-full mx-auto mb-2 border-2 border-white/20"
                         />
                       ) : (
-                        <div className="w-16 h-16 bg-gradient-to-r from-blue-500 to-purple-600 rounded-full flex items-center justify-center mx-auto mb-2 border-2 border-white/20">
-                          <span className="text-white text-xl font-bold">
+                        <div className="w-12 h-12 sm:w-16 sm:h-16 bg-gradient-to-r from-blue-500 to-purple-600 rounded-full flex items-center justify-center mx-auto mb-2 border-2 border-white/20">
+                          <span className="text-white text-sm sm:text-xl font-bold">
                             {getParticipantInitials(localIdentity)}
                           </span>
                         </div>
                       )}
-                      <p className="text-sm font-medium">{localIdentity}</p>
+                      <p className="text-xs sm:text-sm font-medium truncate px-2">{localIdentity}</p>
                     </div>
                   </div>
                 )}
-                <div className="absolute bottom-3 left-3">
-                  <div className="bg-black/60 backdrop-blur-sm px-3 py-1 rounded-full flex items-center space-x-1">
-                    <div className="w-1.5 h-1.5 bg-green-400 rounded-full"></div>
-                    <span className="text-white text-sm font-medium">{localIdentity}</span>
-                    {isMuted && <MicOff className="w-3 h-3 text-red-400" />}
+                <div className="absolute bottom-2 sm:bottom-3 left-2 sm:left-3">
+                  <div className="bg-black/60 backdrop-blur-sm px-2 sm:px-3 py-1 rounded-full flex items-center space-x-1">
+                    <div className="w-1 h-1 sm:w-1.5 sm:h-1.5 bg-green-400 rounded-full"></div>
+                    <span className="text-white text-xs sm:text-sm font-medium truncate max-w-20 sm:max-w-none">{localIdentity}</span>
+                    {isMuted && <MicOff className="w-2.5 h-2.5 sm:w-3 sm:h-3 text-red-400" />}
                   </div>
                 </div>
+                {isScreenSharing && (
+                  <div className="absolute top-2 sm:top-3 right-2 sm:right-3">
+                    <div className="bg-blue-500/80 backdrop-blur-sm px-2 py-1 rounded-full flex items-center space-x-1">
+                      <Monitor className="w-2.5 h-2.5 sm:w-3 sm:h-3 text-white" />
+                      <span className="text-white text-xs">Sharing</span>
+                    </div>
+                  </div>
+                )}
               </motion.div>
 
               {/* Remote Videos */}
@@ -571,7 +628,7 @@ export default function VideoRoom() {
                   initial={{ opacity: 0, scale: 0.8 }}
                   animate={{ opacity: 1, scale: 1 }}
                   transition={{ delay: index * 0.1 }}
-                  className="relative bg-black/30 rounded-2xl overflow-hidden border border-white/10"
+                  className="relative bg-black/30 rounded-xl sm:rounded-2xl overflow-hidden border border-white/10 aspect-square"
                 >
                   <video
                     ref={el => {
@@ -584,26 +641,34 @@ export default function VideoRoom() {
                   {isParticipantVideoOff(participant) && (
                     <div className="absolute inset-0 bg-gradient-to-br from-purple-500/20 to-pink-500/20 flex items-center justify-center">
                       <div className="text-center text-white">
-                        <div className="w-16 h-16 bg-gradient-to-r from-purple-500 to-pink-500 rounded-full flex items-center justify-center mx-auto mb-2 border-2 border-white/20">
-                          <span className="text-white text-xl font-bold">
+                        <div className="w-12 h-12 sm:w-16 sm:h-16 bg-gradient-to-r from-purple-500 to-pink-500 rounded-full flex items-center justify-center mx-auto mb-2 border-2 border-white/20">
+                          <span className="text-white text-sm sm:text-xl font-bold">
                             {getParticipantInitials(participant.identity)}
                           </span>
                         </div>
-                        <p className="text-sm font-medium">
+                        <p className="text-xs sm:text-sm font-medium truncate px-2">
                           {getParticipantDisplayName(participant.identity)}
                         </p>
                       </div>
                     </div>
                   )}
-                  <div className="absolute bottom-3 left-3">
-                    <div className="bg-black/60 backdrop-blur-sm px-3 py-1 rounded-full flex items-center space-x-1">
-                      <div className="w-1.5 h-1.5 bg-green-400 rounded-full"></div>
-                      <span className="text-white text-sm font-medium">
+                  <div className="absolute bottom-2 sm:bottom-3 left-2 sm:left-3">
+                    <div className="bg-black/60 backdrop-blur-sm px-2 sm:px-3 py-1 rounded-full flex items-center space-x-1">
+                      <div className="w-1 h-1 sm:w-1.5 sm:h-1.5 bg-green-400 rounded-full"></div>
+                      <span className="text-white text-xs sm:text-sm font-medium truncate max-w-20 sm:max-w-none">
                         {getParticipantDisplayName(participant.identity)}
                       </span>
-                      {isParticipantMuted(participant) && <MicOff className="w-3 h-3 text-red-400" />}
+                      {isParticipantMuted(participant) && <MicOff className="w-2.5 h-2.5 sm:w-3 sm:h-3 text-red-400" />}
                     </div>
                   </div>
+                  {hasScreenShare(participant) && (
+                    <div className="absolute top-2 sm:top-3 right-2 sm:right-3">
+                      <div className="bg-blue-500/80 backdrop-blur-sm px-2 py-1 rounded-full flex items-center space-x-1">
+                        <Monitor className="w-2.5 h-2.5 sm:w-3 sm:h-3 text-white" />
+                        <span className="text-white text-xs">Sharing</span>
+                      </div>
+                    </div>
+                  )}
                 </motion.div>
               ))}
             </div>
@@ -611,79 +676,91 @@ export default function VideoRoom() {
         </div>
       </div>
 
-      {/* Controls */}
-      <AnimatePresence>
-        {showControls && (
-          <motion.div
-            initial={{ opacity: 0, y: 50 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: 50 }}
-            className="absolute bottom-0 left-0 right-0 bg-black/30 backdrop-blur-lg border-t border-white/10 p-6 z-40"
+      {/* Fixed Controls - Always visible at bottom with safe area */}
+      <motion.div
+        initial={{ opacity: 0, y: 50 }}
+        animate={{ opacity: 1, y: 0 }}
+        className="absolute bottom-0 left-0 right-0 bg-black/40 backdrop-blur-lg border-t border-white/10 p-4 sm:p-6 pb-8 sm:pb-6 z-50"
+        style={{ paddingBottom: 'max(2rem, env(safe-area-inset-bottom))' }}
+      >
+        <div className="max-w-2xl mx-auto flex items-center justify-center space-x-3 sm:space-x-4">
+          <motion.button
+            whileHover={{ scale: 1.05 }}
+            whileTap={{ scale: 0.95 }}
+            onClick={toggleMute}
+            className={`p-3 sm:p-4 rounded-full transition-all ${
+              isMuted 
+                ? 'bg-red-500 hover:bg-red-600' 
+                : 'bg-white/20 hover:bg-white/30'
+            } backdrop-blur-sm`}
+            title={isMuted ? 'Unmute' : 'Mute'}
           >
-            <div className="max-w-2xl mx-auto flex items-center justify-center space-x-4">
-              <motion.button
-                whileHover={{ scale: 1.05 }}
-                whileTap={{ scale: 0.95 }}
-                onClick={toggleMute}
-                className={`p-4 rounded-full transition-all ${
-                  isMuted 
-                    ? 'bg-red-500 hover:bg-red-600' 
-                    : 'bg-white/20 hover:bg-white/30'
-                } backdrop-blur-sm`}
-                title={isMuted ? 'Unmute' : 'Mute'}
-              >
-                {isMuted ? (
-                  <MicOff className="w-6 h-6 text-white" />
-                ) : (
-                  <Mic className="w-6 h-6 text-white" />
-                )}
-              </motion.button>
+            {isMuted ? (
+              <MicOff className="w-5 h-5 sm:w-6 sm:h-6 text-white" />
+            ) : (
+              <Mic className="w-5 h-5 sm:w-6 sm:h-6 text-white" />
+            )}
+          </motion.button>
 
-              <motion.button
-                whileHover={{ scale: 1.05 }}
-                whileTap={{ scale: 0.95 }}
-                onClick={toggleVideo}
-                className={`p-4 rounded-full transition-all ${
-                  isVideoOff 
-                    ? 'bg-red-500 hover:bg-red-600' 
-                    : 'bg-white/20 hover:bg-white/30'
-                } backdrop-blur-sm`}
-                title={isVideoOff ? 'Turn on camera' : 'Turn off camera'}
-              >
-                {isVideoOff ? (
-                  <VideoOff className="w-6 h-6 text-white" />
-                ) : (
-                  <Video className="w-6 h-6 text-white" />
-                )}
-              </motion.button>
+          <motion.button
+            whileHover={{ scale: 1.05 }}
+            whileTap={{ scale: 0.95 }}
+            onClick={toggleVideo}
+            className={`p-3 sm:p-4 rounded-full transition-all ${
+              isVideoOff 
+                ? 'bg-red-500 hover:bg-red-600' 
+                : 'bg-white/20 hover:bg-white/30'
+            } backdrop-blur-sm`}
+            title={isVideoOff ? 'Turn on camera' : 'Turn off camera'}
+          >
+            {isVideoOff ? (
+              <VideoOff className="w-5 h-5 sm:w-6 sm:h-6 text-white" />
+            ) : (
+              <Video className="w-5 h-5 sm:w-6 sm:h-6 text-white" />
+            )}
+          </motion.button>
 
-              <motion.button
-                whileHover={{ scale: 1.05 }}
-                whileTap={{ scale: 0.95 }}
-                onClick={toggleScreenShare}
-                className={`p-4 rounded-full transition-all ${
-                  isScreenSharing 
-                    ? 'bg-blue-500 hover:bg-blue-600' 
-                    : 'bg-white/20 hover:bg-white/30'
-                } backdrop-blur-sm`}
-                title={isScreenSharing ? 'Stop sharing' : 'Share screen'}
-              >
-                <Monitor className="w-6 h-6 text-white" />
-              </motion.button>
+          <motion.button
+            whileHover={{ scale: 1.05 }}
+            whileTap={{ scale: 0.95 }}
+            onClick={toggleScreenShare}
+            className={`p-3 sm:p-4 rounded-full transition-all ${
+              isScreenSharing 
+                ? 'bg-blue-500 hover:bg-blue-600' 
+                : 'bg-white/20 hover:bg-white/30'
+            } backdrop-blur-sm`}
+            title={isScreenSharing ? 'Stop sharing' : 'Share screen'}
+          >
+            <Monitor className="w-5 h-5 sm:w-6 sm:h-6 text-white" />
+          </motion.button>
 
-              <motion.button
-                whileHover={{ scale: 1.05 }}
-                whileTap={{ scale: 0.95 }}
-                onClick={leaveRoom}
-                className="p-4 rounded-full bg-red-500 hover:bg-red-600 transition-colors backdrop-blur-sm"
-                title="Leave meeting"
-              >
-                <PhoneOff className="w-6 h-6 text-white" />
-              </motion.button>
-            </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
+          <motion.button
+            whileHover={{ scale: 1.05 }}
+            whileTap={{ scale: 0.95 }}
+            onClick={leaveRoom}
+            className="p-3 sm:p-4 rounded-full bg-red-500 hover:bg-red-600 transition-colors backdrop-blur-sm"
+            title="Leave meeting"
+          >
+            <PhoneOff className="w-5 h-5 sm:w-6 sm:h-6 text-white" />
+          </motion.button>
+        </div>
+
+        {/* Show controls indicator on mobile */}
+        <AnimatePresence>
+          {!showControls && (
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="absolute bottom-2 left-1/2 transform -translate-x-1/2 sm:hidden"
+            >
+              <div className="bg-white/20 backdrop-blur-sm px-3 py-1 rounded-full">
+                <p className="text-white text-xs">Tap to show controls</p>
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+      </motion.div>
     </div>
   );
 }
