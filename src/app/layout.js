@@ -1,4 +1,4 @@
-import { AuthProvider } from '@/app/Contexts/AuthContext';
+import { AuthProvider } from '@/app/contexts/AuthContext';
 import { Toaster } from 'react-hot-toast';
 import '@/app/globals.css';
 

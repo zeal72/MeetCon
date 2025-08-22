@@ -1,14 +1,14 @@
-'use client';
+"use client";
 
 import { useState } from 'react';
-import { useAuth } from '@/app/Contexts/AuthContext';
+import { useAuth } from '@/app/contexts/AuthContext';
 import QuickActions from '@/components/QuickActions';
 import JoinMeetingModal from '@/components/JoinMeetingModal';
 import AuthModal from '@/components/AuthModal';
 import UserProfile from '@/components/userProfile';
 import { Video, LogIn, UserPlus } from 'lucide-react';
 
-export default function HomeClient({ searchParams }) {
+export default function HomeClient() {
   const [isJoinModalOpen, setIsJoinModalOpen] = useState(false);
   const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
   const [authMode, setAuthMode] = useState('login');

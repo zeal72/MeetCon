@@ -9,7 +9,7 @@
     "lint": "next lint"
   },
   "dependencies": {
-    "@livekit/components-react": "^2.9.13",
+    "@livekit/components-react": "^2.9.14",
     "@livekit/components-styles": "^1.1.6",
     "firebase": "^11.10.0",
     "framer-motion": "^12.23.0",

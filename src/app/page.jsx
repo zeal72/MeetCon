@@ -1,6 +1,5 @@
 import HomeClient from './HomeClient';
 
-// Dynamic metadata generation - only works in Server Components
 export const metadata = {
   title: 'MeetSpace - Connect, Collaborate, Create',
   description: 'Experience seamless video conferencing with crystal-clear quality and intuitive controls.',
@@ -18,7 +17,7 @@ export const metadata = {
   },
 };
 
-// Server Component that renders the Client Component
-export default function Home({ searchParams }) {
-  return <HomeClient searchParams={searchParams} />;
+// Server Component
+export default function Home() {
+  return <HomeClient />;
 }

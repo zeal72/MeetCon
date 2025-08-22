@@ -1,9 +1,8 @@
-// lib/firebase.js or config/firebase.js
-
 import { initializeApp } from 'firebase/app';
 import { getAuth } from 'firebase/auth';
 import { getFirestore } from 'firebase/firestore';
 import { getStorage } from 'firebase/storage';
+import { getDatabase } from 'firebase/database'; // Add this for Realtime DB
 
 const firebaseConfig = {
   apiKey: process.env.NEXT_PUBLIC_FIREBASE_API_KEY,
@@ -20,7 +19,8 @@ const app = initializeApp(firebaseConfig);
 
 // Initialize Firebase services
 export const auth = getAuth(app);
-export const db = getFirestore(app);
+export const db = getFirestore(app); // Firestore (if used elsewhere)
+export const realtimeDb = getDatabase(app); // Realtime DB for user data
 export const storage = getStorage(app);
 
 export default app;

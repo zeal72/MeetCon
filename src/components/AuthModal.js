@@ -1,8 +1,6 @@
-// components/AuthModal.js
-
 import { useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { useAuth } from '@/app/Contexts/AuthContext';
+import { useAuth } from '@/app/contexts/AuthContext';
 import { Mail, Lock, User, X } from 'lucide-react';
 
 export default function AuthModal({ isOpen, onClose, mode = 'login' }) {
